@@ -1,0 +1,96 @@
+
+
+
+JT'S SETUP DIRECTIONS:
+
+Enable SSH
+Disable login as user Pi
+
+change user name
+ssh pi@192.168.x.xxx
+
+Login with your old credentials and add a new user
+sudo adduser pia
+set the password
+Allow the new user to run sudo by adding the user to sudo group:
+sudo adduser pia sudo
+
+sudo reboot
+
+Login as pia on graphical interface
+
+ssh as pia into the rpi
+ssh pia@192.168.1.xxx
+
+sudo usermod -l newUsername oldUsername  --> sudo usermod -l tom linuxcnc
+sudo usermod -d /home/newHomeDir -m newUsername --> sudo usermod -d /home/tom -m tom
+
+sudo reboot
+Login as tom
+
+ssh 192.168.1.xxx
+
+Delete temporary user and folder
+sudo deluser pia
+sudo rm -r /home/pia
+
+For auto login to Debian
+sudo nano /etc/lightdm/lightdm.conf
+
+autologin-user=tom
+autologin-user-timeout=0
+*********************************************************************************
+
+sudo apt update
+apt list --upgradable
+sudo apt dist-upgrade
+sudo apt autoremove
+sudo apt install git
+
+sudo apt clean
+sudo reboot -n
+
+
+
+Change user name
+
+sudo adduser pia
+Adding user `pia' ...
+Adding new group `pia' (1001) ...
+Adding new user `pia' (1001) with group `pia' ...
+Creating home directory `/home/pia' ...
+Copying files from `/etc/skel' ...
+New password: 
+Retype new password: 
+passwd: password updated successfully
+Changing the user information for pia
+Enter the new value, or press ENTER for the default
+	Full Name []: 
+	Room Number []: 
+	Work Phone []: 
+	Home Phone []: 
+	Other []: 
+Is the information correct? [Y/n] 
+
+sudo usermod pia -a -G sudo
+
+logout
+
+ssh pia@192.168.1.60
+
+login at the rpi as pia
+
+usermod -l newname pi
+usermod -m -d /home/newname newname
+
+sudo usermod -l john pi
+sudo groupmod -n john pi
+
+broken here
+sudo usermod -d /home/john john
+sudo usermod -l john -d /home/john -m pi
+sudo reboot
+sudo mv pi john
+passwd
+
+Console Autologin Text console, automatically logged in as 'john' user

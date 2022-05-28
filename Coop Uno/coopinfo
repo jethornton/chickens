@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+
+import sys, os, pytz, signal
+from astral import LocationInfo
+from astral.sun import sun, daylight
+from datetime import datetime, timedelta
+from PyQt5.QtCore import QCoreApplication, QTimer, QTime
+
+# coordinates = ['City', 'Country', 'latitude', longitude', 'timezone', 'elevation']
+PBMO = LocationInfo("Poplar Bluff", "Midwest", "US/Central", 36.873512, -90.488008)
+PBMO.solar_depression = "civil"
+PBTZ = pytz.timezone('US/Central')
+
+# strftime formats
+HM = '%I:%M %p'
+HMS = '%I:%M:%S %p'
+
+class main(QCoreApplication):
+	def __init__(self, *args, **kwargs):
+		super().__init__([])
+
+		# catch Ctrl C when ran from the terminal
+		signal.signal(signal.SIGINT, self.cleanExit)
+		print('Ctrl C to quit')
+		self.timer = QTimer()
+		self.timer.timeout.connect(self.update)
+		self.timer.start(1000) # 1000 milliseconds in a second
+		devices = '/sys/bus/w1/devices/'
+		if os.path.exists(devices):
+			for directory in os.listdir(devices):
+				if directory.startswith('28'):
+					self.sensor = os.path.join(devices, directory, 'w1_slave')
+					print(f'Sensor Path {self.sensor}')
+		else:
+			print(f'{d} is not found!')
+
+		self.todaySun = sun(PBMO.observer, date=datetime.today(), tzinfo=PBTZ)
+		sunlight = daylight(PBMO.observer, date=datetime.today(), tzinfo=PBTZ)
+		light = sunlight[1] - sunlight[0]
+		self.daylight = self.sec2time(light.total_seconds())
+
+
+	def update(self):
+		# update web page
+		now = datetime.now().strftime('%I:%M:%S %p')
+		today = datetime.now().strftime('%A, %B %d, %Y')
+		if self.sensor:
+			with open(self.sensor, 'r') as t:
+				lines = t.readlines()
+			for line in lines:
+				if line.strip()[-3:] != 'YES':
+					c = line.split('=')[1]
+					f = ((float(c) / 1000.0) * (9.0 / 5.0)) + 32.0
+		with open('/var/www/html/status.txt', 'w') as h:
+			h.write('<p>Coop Uno</p>')
+			h.write(f'{today}<br>')
+			h.write(f'Time: {now}<br>')
+			h.write(f'Temperature: {f:.1f}F<br>')
+			h.write(f'Dawn: {self.todaySun["dawn"].strftime(HMS)}<br>')
+			h.write(f'Sunrise: {self.todaySun["sunrise"].strftime(HMS)}<br>')
+			h.write(f'Sunset: {self.todaySun["sunset"].strftime(HMS)}<br>')
+			h.write(f'Dusk: {self.todaySun["dusk"].strftime(HMS)}<br>')
+			h.write(f'Daylight: {self.daylight}<br>')
+			# h.write(f'{}<br>')
+
+	def sec2time(self, s):
+		minutes, seconds = divmod(int(s), 60)
+		hours, minutes = divmod(minutes, 60)
+		return f'{hours:02d}h {minutes:02d}m {seconds:02d}s'
+
+	def cleanExit(self, signum, frame):
+		print('\nBye')
+		sys.exit()
+
+if __name__ == '__main__':
+	app = QCoreApplication(sys.argv)
+	gui = main()
+	sys.exit(app.exec_())
+

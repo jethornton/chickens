@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+
+import sys
+
+from PyQt5.QtCore import QCoreApplication, QTimer, QTime
+
+import RPi.GPIO as GPIO
+
+DOOR_UP = 4
+DOOR_DOWN = 5
+DOOR_LOCK = 6
+LIGHTS = 7
+
+MAN_UP = 22
+MAN_DOWN = 23
+MAN_LIGHT = 24
+
+UP_PROX = 26
+DOWN_PROX = 27
+
+RUN = True
+STOP = False
+ON = True
+OFF = False
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(DOOR_UP, GPIO.OUT) # Motor FWD
+GPIO.output(DOOR_UP, STOP)
+GPIO.setup(DOOR_DOWN, GPIO.OUT) # Motor REV
+GPIO.output(DOOR_DOWN, STOP)
+GPIO.setup(DOOR_LOCK, GPIO.OUT) # Door Lock
+GPIO.output(DOOR_LOCK, STOP)
+GPIO.setup(LIGHTS, GPIO.OUT) # Lights
+GPIO.output(LIGHTS, STOP)
+GPIO.setup(UP_PROX, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Door Up Switch
+GPIO.setup(DOWN_PROX, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Door Down Switch
+GPIO.setup(MAN_UP, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Up Switch
+GPIO.setup(MAN_DOWN, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Down Switch
+GPIO.setup(MAN_LIGHT, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Light Switch
+
+class door(QCoreApplication):
+	def __init__(self, *args, **kwargs):
+		super().__init__([])
+		updateTimer = QTimer(self)
+		updateTimer.timeout.connect(self.run)
+		updateTimer.start(1000)
+		self.du = False
+		self.dd = False
+		#print(f'Door Up Relay: {GPIO.input(DOOR_UP)}')
+		#print(f'Door Down Relay: {GPIO.input(DOOR_DOWN)}')
+
+	def run(self):
+		if GPIO.input(MAN_UP):
+			GPIO.output(DOOR_UP, RUN)
+			if not self.du:
+				print(f'Door Up Relay: {GPIO.input(DOOR_UP)}')
+				self.du = True
+		elif not GPIO.input(MAN_UP):
+			GPIO.output(DOOR_UP, STOP)
+			self.du = False
+
+		if GPIO.input(MAN_DOWN):
+			if not self.dd:
+				print(f'Door Down Relay: {GPIO.input(DOOR_DOWN)}')
+				self.dd = True
+			GPIO.output(DOOR_DOWN, RUN)
+		elif not GPIO.input(MAN_DOWN):
+			GPIO.output(DOOR_DOWN, STOP)
+		if GPIO.input(MAN_LIGHT):
+			GPIO.output(DOOR_LOCK, RUN)
+		elif not GPIO.input(MAN_LIGHT):
+			GPIO.output(DOOR_LOCK, STOP)
+
+
+	def cleanExit(self, signum, frame):
+		GPIO.cleanup()
+		print('\nClean Exit')
+		sys.exit()
+
+if __name__ == '__main__':
+	app = QCoreApplication(sys.argv)
+	gui = door()
+	sys.exit(app.exec_())
+

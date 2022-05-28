@@ -1,0 +1,19 @@
+<html> 
+<head> 
+    <title>Untitled Page</title> 
+    <script type="text/javascript">
+        function Yourfunction() {
+            document.getElementById("data").innerHTML += "Hello<br />";
+        }
+        window.onload = function () {
+            //below line will call above function every 1 sec
+            setInterval("Yourfunction()", 1000);
+        }; 
+    </script> 
+</head> 
+<body> 
+    <form id="form1" runat="server"> 
+    <span id = "data"></span>
+    </form> 
+</body> 
+</html>

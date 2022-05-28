@@ -1,0 +1,10 @@
+cat /sys/bus/w1/devices/28-0416a2af4aff/w1_slave
+
+ls -l /sys/bus/w1/devices/28-0416a2af4aff/w1_slave
+
+
+sudo nano /boot/config.txt
+
+dtoverlay=w1-gpio,gpiopin=17
+
+cat /var/www/html/status.txt

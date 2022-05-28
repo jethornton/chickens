@@ -1,0 +1,450 @@
+#!/usr/bin/python3
+
+'''
+Coop 8.0 2/15/19
+GPIO.VERSION '0.6.3'
+Raspberry Pi 3 Model B Rev 1.2
+LCD display only
+
+*************** I/O is for old coop door **********************
+
+daylight is sunrise to sunset
+
+if daylight is decreasing
+	door opens and lights on at dawn
+
+if daylight is increasing
+	add light ramp * days since solstace up to maximum light
+
+lights off at sunrise plus extra light after sunrise
+
+door closes at dusk
+
+https://doc.qt.io/qt-5/qtimer.html
+To start an event loop from a non-GUI thread, use QThread::exec().
+'''
+
+import sys, os, pytz, schedule, time, signal
+from astral import LocationInfo
+from astral.sun import sun, daylight
+from datetime import datetime, timedelta
+import glob
+
+from PyQt4.QtCore import QCoreApplication
+from PyQt4.QtCore import QTimer
+#from digole import lcd
+import RPi.GPIO as GPIO
+
+# if seedDate == None use today otherwise use the seedDate
+seedDate = None
+# datetime(year, month, day)
+#t = datetime.now()
+#seedDate = datetime(2018, 1, 10, t.hour, t.minute, t.second)
+
+# setup some user variables
+lightOnMin = 60 # minutes of extra light after sunrise
+lightRamp = 4 # how many minutes per day to add light
+totalLight = 840 # minutes of total light up to summer
+minLight = 600 # minutes of natural light to start adding light
+maxLight = 840 # minutes of natural light to stop adding light
+doorTimeOut = 120 # seconds allowed for the door to transition
+#doorTimeOut = 5 # for testing as 60 seconds is needed for the actual door
+
+# initalize some global variables
+centralTz = pytz.timezone('US/Central')
+dateFormat = '%b %d %Y'
+mdFormat = '%b %d'
+hmpFormat = '%I:%M %p'
+hmFormat = '%I:%M'
+hmspFormat = '%I:%M:%S %p'
+#doorStatus = 'Unknown'
+
+# coordinates = ['City', 'Country', 'latitude', longitude', 'timezone', 'elevation']
+#coordinates = ["Poplar Bluff", "USA", 36.763084, -90.413871, 'US/Central', 110]
+#pbmo = astral.Location(info=(coordinates))
+PBMO = LocationInfo("Poplar Bluff", "Midwest", "US/Central", 36.873512, -90.488008)
+PBMO.solar_depression = "civil"
+PBTZ = pytz.timezone('US/Central')
+HM = '%I:%M %p'
+HMS = '%I:%M:%S %p'
+
+# bassackwards 4 in 1 relay constants
+#RUN = False
+#STOP = True
+#ON = False
+#OFF = True
+
+# normal relays
+RUN = True
+STOP = False
+ON = True
+OFF = False
+
+# setup I/O Constants
+# outputs
+DOOR_UP = 4
+DOOR_DOWN = 5
+DOOR_LOCK = 6
+LIGHTS = 7
+# inputs
+MAN_UP = 22
+MAN_DOWN = 23
+MAN_LIGHT = 24
+UP_PROX = 26
+DOWN_PROX = 27
+
+# setup I/O
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(DOOR_UP, GPIO.OUT) # Motor FWD
+GPIO.output(DOOR_UP, STOP)
+GPIO.setup(DOOR_DOWN, GPIO.OUT) # Motor REV
+GPIO.output(DOOR_DOWN, STOP)
+GPIO.setup(DOOR_LOCK, GPIO.OUT) # Door Lock
+GPIO.output(DOOR_LOCK, STOP)
+GPIO.setup(LIGHTS, GPIO.OUT) # Lights
+GPIO.output(LIGHTS, STOP)
+GPIO.setup(UP_PROX, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Door Up Switch
+GPIO.setup(DOWN_PROX, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Door Down Switch
+GPIO.setup(MAN_UP, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Up Switch
+GPIO.setup(MAN_DOWN, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Down Switch
+GPIO.setup(MAN_LIGHT, GPIO.IN,pull_up_down=GPIO.PUD_DOWN) # Manual Light Switch
+
+class Chick(QCoreApplication):
+	def __init__(self, *args, **kwargs):
+		super(Chick, self).__init__(*args, **kwargs)
+		schedule.every().day.at('00:01').do(self.updateSun)
+		# catch Ctrl C when ran from the terminal
+		signal.signal(signal.SIGINT, self.cleanExit)
+		updateTimer = QTimer(self)
+		updateTimer.timeout.connect(self.run)
+		updateTimer.start(1000)
+
+		# Door variables
+		self.doorOpening = False
+		self.doorClosing = False
+		self.doorTimedOut = False
+		self.doorStatus = 'Unknown'
+		self.manualDoor = ''
+		self.doorUpLimitTicks = 0
+		self.doorDownLimitTicks = 0
+		self.doorOpenAttempts = 0
+		self.doorCloseAttempts = 0
+		self.notOpenTimerRunning = False
+		self.notClosedTimerRunning = False
+
+		# Temperature variables
+		self.temperature1 = 0.0
+
+		# Astrial variables
+		self.todaySun = sun(PBMO.observer, date=datetime.today(), tzinfo=PBTZ)
+
+		self.updateSun()
+
+	# on bootup/update set up the door/light open times for today
+	def updateSun(self):
+		self.todaySun = sun(PBMO.observer, date=datetime.today(), tzinfo=PBTZ)
+
+		# get todays sunlight
+		todaySun = daylight(PBMO.observer, date=datetime.today(), tzinfo=PBTZ)
+		todayLight = todaySun[1] - todaySun[0]
+
+		todayLightSeconds = todayLight.total_seconds()
+
+		yesterdaySun = daylight(PBMO.observer, date=datetime.today() - timedelta(days=1), tzinfo=PBTZ)
+		yesterdayLight = yesterdaySun[1] - yesterdaySun[0]
+		yesterdayLightSeconds = yesterdayLight.total_seconds()
+
+		self.doorOpenTime = self.todaySun['sunrise']
+		self.lightOnTime = self.todaySun['sunrise']
+
+		self.doorCloseTime = self.todaySun['dusk']
+		self.lightOffTime = self.todaySun['sunrise'] + timedelta(minutes=lightOnMin)
+
+		self.updateStatus()
+
+	def solstice(self): # return the days since winter solstace
+		today=datetime.today()
+
+		for i in range(1, 180): #find last date with minLight
+			testDate = today - timedelta(days = i)
+			testSun = daylight(PBMO.observer, testDate, tzinfo=PBTZ)
+			testLight = (testSun[1] - testSun[0])
+			testLightSeconds = testLight.total_seconds()
+			previousDate = today - timedelta(days = i+1)
+			previousSun = daylight(PBMO.observer, previousDate, tzinfo=PBTZ)
+			previousLight = previousSun[1] - previousSun[0]
+			previousLightSeconds = previousLight.total_seconds()
+			if previousLightSeconds > testLightSeconds: # solstice
+				lightDays = (today - testDate).days
+				break
+		return lightDays
+
+	def solstace(self, today):
+		for i in range(1, 180): #find last date with minLight
+			testDate = today - timedelta(days = i)
+			testSun = PBMO.sun(testDate)
+			testLight = int((testSun['sunset'] - testSun['sunrise']).total_seconds())
+			previousSun = PBMO.sun(today - timedelta(days = i+1))
+			previousLight = int((previousSun['sunset'] - previousSun['sunrise']).total_seconds())
+			if previousLight > testLight: # solstice
+				lightDays = (today - testDate).days
+				break
+		return lightDays
+
+	def sec2time(self, s):
+		minutes, seconds = divmod(int(s), 60)
+		hours, minutes = divmod(minutes, 60)
+		return '{}:{}:{}'.format(hours, minutes, seconds)
+
+	def openDoor(self):
+		self.doorTimer()
+		#self.displayShow('Door Open Time =', 0, 9, True)
+		if not GPIO.input(UP_PROX):
+			GPIO.output(DOOR_LOCK, RUN)
+			GPIO.output(DOOR_UP, RUN)
+			self.doorOpening = True
+			self.doorClosing = False
+			self.doorUpLimitTicks = 0
+			self.doorStatus = 'Opening'
+			self.updateStatus()
+
+
+	def closeDoor(self):
+		self.doorTimer()
+		#self.displayShow('Door Close Time =', 0, 9, True)
+		if not GPIO.input(DOWN_PROX):
+			GPIO.output(DOOR_LOCK, RUN)
+			GPIO.output(DOOR_DOWN, RUN)
+			self.doorClosing = True
+			self.doorOpening = False
+			self.doorDownLimitTicks = 0
+			self.doorStatus = 'Closing'
+			self.updateStatus()
+
+	def stopDoor(self):
+		GPIO.output(DOOR_LOCK, STOP)
+		GPIO.output(DOOR_UP, STOP)
+		GPIO.output(DOOR_DOWN, STOP)
+		self.cancelDoorTimer()
+
+	def doorTimer(self):
+		self.doorTransitionTicks = 0
+		self.transitionTimer = QTimer()
+		self.transitionTimer.timeout.connect(self.doorInMotion)
+		self.transitionTimer.start(100)
+
+	def doorInMotion(self):
+		self.doorTransitionTicks += 1
+		#if self.doorTransitionTicks % 10 == 0:
+		#	self.displayShow(str(int(self.doorTransitionTicks/10)), 18, 9)
+
+		if self.doorTransitionTicks >= (doorTimeOut * 10):
+			self.cancelDoorTimer()
+			self.stopDoor()
+			self.doorTimedOut = True
+			if self.doorOpening:
+				#self.displayShow('Open Fail', 0, 9, True)
+				self.doorStatus = 'Open Fail'
+				self.updateStatus()
+			if self.doorClosing:
+				#self.displayShow('Close Fail', 0, 9, True)
+				self.doorStatus = 'Close Fail'
+				self.updateStatus()
+
+		# Door Opening
+		if self.doorOpening and GPIO.input(UP_PROX):
+			self.doorUpLimitTicks += 1
+		if self.doorOpening and not GPIO.input(UP_PROX):
+			self.doorUpLimitTicks = 0
+		if self.doorOpening and self.doorUpLimitTicks >= 5:
+			print('Door Up Limit Ticks {}'.format(self.doorUpLimitTicks))
+			self.doorStatus = 'Open'
+			self.updateStatus()
+			#self.displayShow('Door Open', 0, 6)
+			print('Door Opened and Up Prox')
+			self.notOpenTimerRunning = False
+			self.stopDoor()
+
+		# Door Closing
+		if self.doorClosing and GPIO.input(DOWN_PROX):
+			self.doorDownLimitTicks += 1
+		if self.doorClosing and not GPIO.input(DOWN_PROX):
+			self.doorDownLimitTicks = 0
+		if self.doorClosing and self.doorDownLimitTicks >= 5:
+			print('Door Down Limit Ticks {}'.format(self.doorDownLimitTicks))
+			self.doorStatus = 'Shut'
+			self.updateStatus()
+			#self.displayShow('Door Shut', 0, 6)
+			print('Door Closed and Down Prox')
+			self.notClosedTimerRunning = False
+			self.stopDoor()
+
+	def cancelDoorTimer(self):
+		if self.transitionTimer:
+			self.transitionTimer.stop()
+			self.transitionTimer.deleteLater()
+
+	def updateStatus(self):
+		with open('/var/www/html/status.txt', 'w') as statusFile:
+			statusFile.write(f'Time: {datetime.now().strftime(HMS)}\n')
+			statusFile.write(f'Coop Ambient: {self.temperature1:.1f}F\n')
+			statusFile.write('Door Status: {}\n'.format(self.doorStatus))
+			statusFile.write('Door Opens: {} '.format(self.doorOpenTime.strftime(HMS)))
+			statusFile.write('Closes: {}\n'.format(self.doorCloseTime.strftime(HMS)))
+			statusFile.write('Lights On: {} '.format(self.lightOnTime.strftime(HM)))
+			statusFile.write('Off: {}\n'.format(self.lightOffTime.strftime(HM)))
+			statusFile.write('Dawn {} '.format(self.todaySun['dawn'].strftime(HMS)))
+			statusFile.write('Sunrise {}\n'.format(self.todaySun['sunrise'].strftime(HMS)))
+			statusFile.write('Sunset {} '.format(self.todaySun['sunset'].strftime(HMS)))
+			statusFile.write('Dusk {}'.format(self.todaySun['dusk'].strftime(HMS)))
+
+	def run(self):
+		schedule.run_pending()
+		if seedDate:
+			today = centralTz.localize(seedDate)
+		else:
+			today = centralTz.localize(datetime.now())
+
+		#self.displayShow('{}'.format(datetime.now().strftime(hmFormat)), 7, 0)
+		if GPIO.input(MAN_UP):
+			#if self.manualDoor != 'UP':
+			#	self.displayShow('Door Switch Up', 0, 8, True)
+			self.manualDoor = 'UP'
+		if GPIO.input(MAN_DOWN):
+			#if self.manualDoor != 'DOWN':
+			#	self.displayShow('Door Switch Down', 0, 8, True)
+			self.manualDoor = 'DOWN'
+		if not GPIO.input(MAN_DOWN) and not GPIO.input(MAN_UP):
+			#if self.manualDoor != 'OFF':
+			#	self.displayShow('Door Switch Off', 0, 8, True)
+			self.manualDoor = 'OFF'
+
+		# light control
+		lightOn = today > self.lightOnTime and today < self.lightOffTime
+		#print(self.doorOpenTime)
+		#print(self.lightOffTime)
+		#print(lightOn)
+		if lightOn or GPIO.input(MAN_LIGHT):
+			GPIO.output(LIGHTS, ON)
+			#self.displayShow('Light ON ', 11, 6)
+			self.lightStatus = 'ON'
+		elif not lightOn and not GPIO.input(MAN_LIGHT):
+			GPIO.output(LIGHTS, OFF)
+			#self.displayShow('Light OFF', 11, 6)
+			self.lightStatus = 'OFF'
+		if not lightOn and not GPIO.input(MAN_LIGHT):
+			pass
+
+		# door control
+		doorOpen = today > self.doorOpenTime and today < self.doorCloseTime
+		if GPIO.input(MAN_DOWN) or GPIO.input(MAN_UP):
+			autoDoor = False
+		else:
+			autoDoor = True
+		if autoDoor and not self.doorTimedOut:
+			if not self.doorOpening and doorOpen:
+				print('Auto Open')
+				self.doorOpening = True
+				self.doorClosing = False
+				self.doorOpenAttempts += 1
+				self.openDoor()
+
+			if not self.doorClosing and not doorOpen:
+				print('Auto Close')
+				self.doorClosing = True
+				self.doorOpening = False
+				self.doorCloseAttempts += 1
+				self.closeDoor()
+
+		# door check
+		if self.doorStatus == 'Open' and not GPIO.input(UP_PROX):
+			if not self.notOpenTimerRunning:
+				print('starting door not open timer')
+				self.doorNotOpenTimer = QTimer(self)
+				self.doorNotOpenTimer.timeout.connect(self.restartOpenDoor)
+				self.doorNotOpenTimer.setSingleShot(True)
+				self.doorNotOpenTimer.start(10000)
+				self.notOpenTimerRunning = True
+
+		if self.doorStatus == 'Shut' and not GPIO.input(DOWN_PROX):
+			if not self.notClosedTimerRunning:
+				print('starting door not closed timer')
+				self.doorNotClosedTimer = QTimer(self)
+				self.doorNotClosedTimer.timeout.connect(self.restartCloseDoor)
+				self.doorNotClosedTimer.setSingleShot(True)
+				self.doorNotClosedTimer.start(10000)
+				self.notClosedTimerRunning = True
+
+		# Manual Door Open
+		if GPIO.input(MAN_UP) and not self.doorOpening:
+			print('Manual Open')
+			self.doorOpening = True
+			self.doorClosing = False
+			self.doorTimedOut = False
+			self.doorOpenAttempts = 0
+			self.doorStatus = 'Unknown'
+			self.openDoor()
+
+		# Manual Door Close
+		if GPIO.input(MAN_DOWN) and not self.doorClosing:
+			print('Manual Close')
+			self.doorClosing = True
+			self.doorOpening = False
+			self.doorTimedOut = False
+			self.doorCloseAttempts = 0
+			self.doorStatus = 'Unknown'
+			self.closeDoor()
+
+		# get temperature
+		base_dir = '/sys/bus/w1/devices/'
+		device_folder = glob.glob(base_dir + '28*')[0]
+		device_file = device_folder + '/w1_slave'
+		with open(device_file, 'r') as DS18B20:
+			lines = DS18B20.readlines()
+		if lines: # test for an empty list
+			if lines[0].find('YES'):
+				pos = lines[1].find("=")
+				data = lines[1][pos+1:].rstrip()
+				temp_c = float(data) / 1000.0
+				self.temperature1 = temp_c * 9.0 / 5.0 + 32.0
+				#self.temperatureLbl.setText("Coop {:.1f}°F".format(self.temperature1))
+
+		nowTime = datetime.now().strftime(hmpFormat)
+		todayLight = int(((self.todaySun['sunset'] - self.todaySun['sunrise']).total_seconds()/60))
+
+	def restartOpenDoor(self):
+		if self.doorOpenAttempts <= 2:
+			print('restarting door open {} attempts'.format(self.doorOpenAttempts))
+			self.doorStatus = 'Unknown'
+			self.doorNotOpenTimer.stop()
+			self.doorNotOpenTimer.deleteLater()
+			self.doorOpenAttempts += 1
+			print(self.doorOpenAttempts)
+			self.openDoor()
+
+	def restartCloseDoor(self):
+		if self.doorCloseAttempts <= 2:
+			print('restarting door close {} attempts'.format(self.doorCloseAttempts))
+			self.doorStatus = 'Unknown'
+			self.doorNotClosedTimer.stop()
+			self.doorNotClosedTimer.deleteLater()
+			self.doorCloseAttempts += 1
+			print(self.doorCloseAttempts)
+			self.closeDoor()
+
+
+	def cleanExit(self, signum, frame):
+		GPIO.cleanup()
+		#try:
+		#	display.clearScreen()
+		#	display.changePosition(0, 0)
+		#	display.writeLine('Coop7 Clean Exit')
+		#except IOError:
+		#	pass
+		print('\nClean Exit')
+		sys.exit()
+
+app = Chick(sys.argv)
+app.exec_()
+

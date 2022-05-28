@@ -1,0 +1,7 @@
+Time: 08:04:38 AM
+Coop Ambient: 46.9F
+Door Status: Open
+Door Opens: 07:12:38 AM
+Door Closes: 05:41:45 PM
+Dawn 06:44:03 AM Sunrise 07:12:38 AM
+Sunset 05:13:09 PM Dusk 05:41:45 PM
